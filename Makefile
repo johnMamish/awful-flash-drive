@@ -34,7 +34,7 @@ NM = $(CROSS_COMPILE)nm
 #    gcc flags     #
 ####################
 # Warnings / errors
-CFLAGS += -Wall -Werror -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function
+CFLAGS += -Wall -Werror -Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-missing-braces
 
 # ARM stuff
 CFLAGS += -march=armv6-m -mthumb -mno-thumb-interwork -mtune=cortex-m0plus

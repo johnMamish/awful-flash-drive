@@ -1,17 +1,21 @@
 #include "samd21.h"
 
 #include "char_buffer.h"
+#include "usb_descriptors.h"
 
 #include <stdint.h>
+#include <string.h>
 
 const volatile uint8_t *NVM_SOFTWARE_CAL_AREA = (void*)0x806020;
 
 volatile char_buffer_t sercom3_tx_buf;
 uint8_t sercom3_tx_buf_space[1024];
 
-static volatile UsbDeviceDescriptor endpoint_descriptors[8] __attribute__((aligned(4)));
+static volatile UsbDeviceDescriptor endpoint_descriptors[8] __attribute__((aligned(4))) = { 0 };
 
-uint8_t ep0_buf[64];
+uint8_t ep0_out_buf[64];
+uint8_t ep0_in_buf[64];
+
 
 void SERCOM3_putch(char ch)
 {
@@ -73,6 +77,16 @@ void SERCOM3_puti(uint32_t n)
 
     for (int j = (i - 1); j >= 0; j--) {
         SERCOM3_putch(buf[j]);
+    }
+}
+
+void hexprint(uint8_t *data, int len)
+{
+    for (int i = 0; i < len; i++) {
+        SERCOM3_putx8(data[i]);
+        SERCOM3_putch(' ');
+        if ((i & 0x0f) == 0x0f)
+            SERCOM3_puts("\r\n");
     }
 }
 
@@ -185,13 +199,20 @@ void init_hardware()
     USB->DEVICE.CTRLB.bit.SPDCONF = USB_DEVICE_CTRLB_SPDCONF_FS;
     USB->DEVICE.CTRLA.bit.ENABLE = 1;
     USB->DEVICE.DESCADD.reg = (uint32_t)endpoint_descriptors;
+    USB->DEVICE.INTENSET.bit.EORST = 1;
 
+    // BASE ENDPOINT CONFIGURATIONS -- need to be re-run after usb reset
     // Configure endpoint 0
     USB->DEVICE.DeviceEndpoint[0].EPCFG.bit.EPTYPE0 = 1;
-    //USB->DEVICE.DeviceEndpoint[0].;
-    endpoint_descriptors[0].DeviceDescBank[0].ADDR.reg = (uint32_t)ep0_buf;
+    USB->DEVICE.DeviceEndpoint[0].EPCFG.bit.EPTYPE1 = 1;
+    USB->DEVICE.DeviceEndpoint[0].EPINTENSET.bit.RXSTP = 1;
+    // </ENDPOINT CONFIGURATIONS>
+
+    endpoint_descriptors[0].DeviceDescBank[0].ADDR.reg = (uint32_t)ep0_out_buf;
     endpoint_descriptors[0].DeviceDescBank[0].PCKSIZE.bit.SIZE = 3;
-    endpoint_descriptors[0].DeviceDescBank[0].PCKSIZE.bit.MULTI_PACKET_SIZE = 0;
+
+    endpoint_descriptors[0].DeviceDescBank[1].ADDR.reg = (uint32_t)ep0_in_buf;
+    endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.SIZE = 3;
 
     // Attach USB hardware
     USB->DEVICE.CTRLB.bit.DETACH = 0;
@@ -206,21 +227,129 @@ int main()
 
     // enable sercom interrupts in nvic
     NVIC_EnableIRQ(SERCOM3_IRQn);
+    NVIC_EnableIRQ(USB_IRQn);
     asm volatile("cpsie if");
+
+    SERCOM3_puts("=================\r\n");
 
     // startup PORT peripheral in power manager
     // nothing to do. on by default.
 
     // wait until we get a setup packet, then print its contents
-    while (!USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.bit.RXSTP);
-    SERCOM3_puts("got usb setup packet\r\n");
-    for (int i = 0; i < 64; i++) {
-        SERCOM3_putx8(ep0_buf[i]);
-        SERCOM3_putch(' ');
-    }
-    SERCOM3_puts("\r\n");
-
     while(1) {
 
     }
+}
+
+const uint8_t descriptor[] =
+{
+    18,                                  // size of descriptor in bytes
+    USB_DEVICE_DESCRIPTOR_TYPE_DEVICE,   // descriptor type
+    0x10,                                // usb version
+    0x02,
+    0xff,                                // dev class
+    0xff,                                // dev subclass
+    0xff,                                // device protocol
+    64,                                  // ep0 max packet size
+    0x11,                                // vendor id lsb
+    0xba,                                // vendor id msb
+    0x0f,                                // product id
+    0xf0,
+    0x01,                                // device release #
+    0x00,
+    0x00,                                // manufacturer string idx
+    0x00,                                // product string idx
+    0x00,                                // serial number string idx
+    0x01,                                // nconfigs
+};
+
+
+uint32_t fill_setup_response(volatile usb_device_request_t *req, volatile uint8_t *dest)
+{
+    uint32_t bytes_filled = 0;
+    switch (req->request) {
+        // GET_DESCRIPTOR
+        case 0x06: {
+            bytes_filled = (req->length > 18) ? 18 : req->length;
+            memcpy((uint8_t*)dest, descriptor, bytes_filled);
+            break;
+        }
+    }
+
+    return bytes_filled;
+}
+
+
+void USB_Handler()
+{
+    static uint8_t addr = 0;
+
+    // handle usb events
+    if (USB->DEVICE.INTFLAG.bit.EORST) {
+        SERCOM3_puts("USB reset\r\n");
+        USB->DEVICE.DeviceEndpoint[0].EPCFG.bit.EPTYPE0 = 1;
+        USB->DEVICE.DeviceEndpoint[0].EPINTENSET.bit.RXSTP = 1;
+        USB->DEVICE.DeviceEndpoint[0].EPINTENSET.bit.TRCPT0 = 1;
+        USB->DEVICE.DeviceEndpoint[0].EPINTENSET.bit.TRCPT1 = 1;
+        USB->DEVICE.INTFLAG.reg = USB_DEVICE_INTFLAG_EORST;
+    }
+
+    // handle endpoint 0 events
+    if (USB->DEVICE.EPINTSMRY.bit.EPINT0) {
+        static usb_device_request_t request;
+
+        // TODO: would it be nice if we had some sort of state machine keeping track of what we
+        // expect next during setup transactions?
+        // Check and see if a setup packet was rx'd. If it was, either fill the buffer with the
+        // requested data or latch the request and prepare to recieve a command IN stage.
+        if (USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.bit.RXSTP) {
+            SERCOM3_puts("got SETUP, ");
+            SERCOM3_putx(endpoint_descriptors[0].DeviceDescBank[0].PCKSIZE.bit.BYTE_COUNT);
+            SERCOM3_puts(" bytes:\r\n");
+            hexprint(ep0_out_buf, 8);
+            SERCOM3_puts("\r\n");
+
+            // save setup request
+            memcpy(&request, ep0_out_buf, 8);
+
+            if (request.request_type & (1 << 7)) {
+                // SETUP for device-to-host transfer
+                uint32_t bytes_to_send = fill_setup_response(&request, (void *)ep0_in_buf);
+                endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
+                USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.BK1RDY = 1;
+            } else {
+                // handle commands without a data stage
+                // NB: the only host->device command with a data stage is "SET_DESCRIPTOR"
+                addr = ep0_out_buf[2];
+                endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = 0;
+                USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.BK1RDY = 1;
+
+            }
+
+            USB->DEVICE.DeviceEndpoint[0].EPSTATUSCLR.bit.BK0RDY = 1;
+            // clear RXSTP bit
+            USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_RXSTP;
+        }
+
+
+        if (USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.bit.TRCPT0) {
+            SERCOM3_puts("TRCPT, ");
+            SERCOM3_putx(endpoint_descriptors[0].DeviceDescBank[0].PCKSIZE.bit.BYTE_COUNT);
+            SERCOM3_puts(" bytes:\r\n");
+            hexprint(ep0_out_buf, 8);
+            SERCOM3_puts("\r\n");
+
+            USB->DEVICE.DeviceEndpoint[0].EPSTATUSCLR.bit.BK0RDY = 1;
+            USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT0;
+        }
+
+        if (USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.bit.TRCPT1) {
+            if (request.request == 5) {
+                USB->DEVICE.DADD.reg = (1 << 7) | addr;
+            }
+            USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT1;
+        }
+    }
+
+    SERCOM3_puts("\r\n");
 }
