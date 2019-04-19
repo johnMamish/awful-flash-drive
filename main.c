@@ -264,14 +264,49 @@ const uint8_t descriptor[] =
 };
 
 
-uint32_t fill_setup_response(volatile usb_device_request_t *req, volatile uint8_t *dest)
+uint8_t configuration_descriptor[] =
+{
+    9,
+    USB_DEVICE_DESCRIPTOR_TYPE_CONFIGURATION,
+    9,
+    0,
+    0,
+    0,
+    0,
+    0x80,
+    50
+};
+
+int32_t fill_setup_response(volatile usb_device_request_t *req, volatile uint8_t *dest)
 {
     uint32_t bytes_filled = 0;
     switch (req->request) {
         // GET_DESCRIPTOR
         case 0x06: {
-            bytes_filled = (req->length > 18) ? 18 : req->length;
-            memcpy((uint8_t*)dest, descriptor, bytes_filled);
+            usb_device_descriptor_type_e dt = req->value >> 8;
+            switch(dt) {
+                case USB_DEVICE_DESCRIPTOR_TYPE_DEVICE: {
+                    bytes_filled = (req->length > 18) ? 18 : req->length;
+                    memcpy((uint8_t*)dest, descriptor, bytes_filled);
+                    break;
+                }
+
+                case USB_DEVICE_DESCRIPTOR_TYPE_CONFIGURATION: {
+                    bytes_filled = (req->length > 9) ? 9 : req->length;
+                    memcpy((uint8_t*)dest, configuration_descriptor, bytes_filled);
+                    break;
+                }
+
+                default: {
+                    bytes_filled = -1;
+                    break;
+                }
+            }
+            break;
+        }
+
+        default: {
+            bytes_filled = -1;
             break;
         }
     }
@@ -314,9 +349,14 @@ void USB_Handler()
 
             if (request.request_type & (1 << 7)) {
                 // SETUP for device-to-host transfer
-                uint32_t bytes_to_send = fill_setup_response(&request, (void *)ep0_in_buf);
-                endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
-                USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.BK1RDY = 1;
+                int32_t bytes_to_send = fill_setup_response(&request, (void *)ep0_in_buf);
+                if (bytes_to_send < 0) {
+                    // STALL
+                    USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.STALLRQ0 = 1;
+                } else {
+                    endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
+                    USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.BK1RDY = 1;
+                }
             } else {
                 // handle commands without a data stage
                 // NB: the only host->device command with a data stage is "SET_DESCRIPTOR"
@@ -327,16 +367,21 @@ void USB_Handler()
             }
 
             USB->DEVICE.DeviceEndpoint[0].EPSTATUSCLR.bit.BK0RDY = 1;
+
             // clear RXSTP bit
             USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_RXSTP;
+
+            // XXX TODO: there may be a better way to handle this.
+            // clear TRCPT0 status
+            USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT0;
         }
 
-
         if (USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.bit.TRCPT0) {
+            uint8_t bytes = endpoint_descriptors[0].DeviceDescBank[0].PCKSIZE.bit.BYTE_COUNT;
             SERCOM3_puts("TRCPT, ");
-            SERCOM3_putx(endpoint_descriptors[0].DeviceDescBank[0].PCKSIZE.bit.BYTE_COUNT);
+            SERCOM3_putx(bytes);
             SERCOM3_puts(" bytes:\r\n");
-            hexprint(ep0_out_buf, 8);
+            hexprint(ep0_out_buf, bytes);
             SERCOM3_puts("\r\n");
 
             USB->DEVICE.DeviceEndpoint[0].EPSTATUSCLR.bit.BK0RDY = 1;
