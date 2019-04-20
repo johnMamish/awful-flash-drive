@@ -6,6 +6,13 @@
 #include <stdint.h>
 #include <string.h>
 
+/**
+ * USB todos:
+ *   ( ) Handle status stages which are longer than the endpoint size
+ *   ( ) Keep track of which status stage we are in so that we can recover from errors
+ *   ( )
+ */
+
 const volatile uint8_t *NVM_SOFTWARE_CAL_AREA = (void*)0x806020;
 
 volatile char_buffer_t sercom3_tx_buf;
@@ -264,17 +271,53 @@ const uint8_t descriptor[] =
 };
 
 
+/**
+ * order to flatten these descriptors is on page 253 of the usb 2.0 spec
+ * it looks like the only way to get to the interface and endpoint descriptors is by requesting the
+ * "full" configuration descriptor. (yes, page 267 says so)
+ */
 uint8_t configuration_descriptor[] =
 {
     9,
     USB_DEVICE_DESCRIPTOR_TYPE_CONFIGURATION,
-    9,
+    32,   // wTotalLength
     0,
-    0,
-    0,
-    0,
+    1,    // bNumInterfaces
+    1,    // bConfig value
+          // NB: linux source comments informed me this value should start at 1.
+          // USB 2.0 spec section 9.1.1.5 implies that this value must not be 0.
+    0,    // string index
     0x80,
-    50
+    50,
+
+    // ================================
+    9,
+    USB_DEVICE_DESCRIPTOR_TYPE_INTERFACE,
+    0,  // interfaceNumber
+    0,  // aternateSetting
+    2,  // numEndpoints
+    0xff,  // interfaceClass
+    0xff,  // interfaceSubclass
+    0xff,  // interfaceProtocol
+    0,   // string index
+
+    // ================
+    7,
+    USB_DEVICE_DESCRIPTOR_TYPE_ENDPOINT,
+    0x01,    // endpoint number
+    0x02,    // bmAttributes (0x02 = bulk data)
+    64,      // wMaxPacketSize
+    0,
+    0,       // bInterval
+
+    // ================
+    7,
+    USB_DEVICE_DESCRIPTOR_TYPE_ENDPOINT,
+    0x82,    // endpoint number
+    0x02,    // bmAttributes (0x02 = bulk data)
+    64,      // wMaxPacketSize
+    0,
+    0,       // bInterval
 };
 
 int32_t fill_setup_response(volatile usb_device_request_t *req, volatile uint8_t *dest)
@@ -292,7 +335,7 @@ int32_t fill_setup_response(volatile usb_device_request_t *req, volatile uint8_t
                 }
 
                 case USB_DEVICE_DESCRIPTOR_TYPE_CONFIGURATION: {
-                    bytes_filled = (req->length > 9) ? 9 : req->length;
+                    bytes_filled = (req->length > 32) ? 32 : req->length;
                     memcpy((uint8_t*)dest, configuration_descriptor, bytes_filled);
                     break;
                 }
@@ -352,7 +395,8 @@ void USB_Handler()
                 int32_t bytes_to_send = fill_setup_response(&request, (void *)ep0_in_buf);
                 if (bytes_to_send < 0) {
                     // STALL
-                    USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.STALLRQ0 = 1;
+                    SERCOM3_puts("responding with STALL\r\n");
+                    USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.STALLRQ1 = 1;
                 } else {
                     endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
                     USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.BK1RDY = 1;
