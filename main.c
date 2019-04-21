@@ -1,6 +1,7 @@
 #include "samd21.h"
 
 #include "char_buffer.h"
+#include "interrupt_utils.h"
 #include "usb_descriptors.h"
 
 #include <stdint.h>
@@ -23,10 +24,13 @@ static volatile UsbDeviceDescriptor endpoint_descriptors[8] __attribute__((align
 uint8_t ep0_out_buf[64];
 uint8_t ep0_in_buf[64];
 
+uint8_t ep1_in_buf[64];
+uint8_t ep2_out_buf[64];
 
 void SERCOM3_putch(char ch)
 {
-    asm volatile("cpsid if");
+    uint32_t ctx;
+    interrupts_disable(&ctx);
     if (SERCOM3->USART.INTENSET.reg & SERCOM_USART_INTENSET_DRE) {
         // If the txempty interrupt is already enabled, it's expecting data in the buffer
         char_buffer_putc(&sercom3_tx_buf, ch);
@@ -35,7 +39,7 @@ void SERCOM3_putch(char ch)
         SERCOM3->USART.INTENSET.reg = SERCOM_USART_INTENSET_DRE;
         SERCOM3->USART.DATA.reg = ch;
     }
-    asm volatile("cpsie if");
+    interrupts_restore(&ctx);
 }
 
 
@@ -213,6 +217,16 @@ void init_hardware()
     USB->DEVICE.DeviceEndpoint[0].EPCFG.bit.EPTYPE0 = 1;
     USB->DEVICE.DeviceEndpoint[0].EPCFG.bit.EPTYPE1 = 1;
     USB->DEVICE.DeviceEndpoint[0].EPINTENSET.bit.RXSTP = 1;
+    USB->DEVICE.DeviceEndpoint[0].EPINTENSET.bit.TRCPT0 = 1;
+    USB->DEVICE.DeviceEndpoint[0].EPINTENSET.bit.TRCPT1 = 1;
+
+    USB->DEVICE.DeviceEndpoint[1].EPCFG.bit.EPTYPE0 = 0;
+    USB->DEVICE.DeviceEndpoint[1].EPCFG.bit.EPTYPE1 = 3;
+    USB->DEVICE.DeviceEndpoint[1].EPINTENSET.bit.TRCPT1 = 1;
+
+    USB->DEVICE.DeviceEndpoint[2].EPCFG.bit.EPTYPE0 = 3;
+    USB->DEVICE.DeviceEndpoint[2].EPCFG.bit.EPTYPE1 = 0;
+    USB->DEVICE.DeviceEndpoint[2].EPINTENSET.bit.TRCPT0 = 1;
     // </ENDPOINT CONFIGURATIONS>
 
     endpoint_descriptors[0].DeviceDescBank[0].ADDR.reg = (uint32_t)ep0_out_buf;
@@ -220,6 +234,12 @@ void init_hardware()
 
     endpoint_descriptors[0].DeviceDescBank[1].ADDR.reg = (uint32_t)ep0_in_buf;
     endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.SIZE = 3;
+
+    endpoint_descriptors[1].DeviceDescBank[1].ADDR.reg = (uint32_t)ep1_in_buf;
+    endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.SIZE = 3;
+
+    endpoint_descriptors[2].DeviceDescBank[0].ADDR.reg = (uint32_t)ep2_out_buf;
+    endpoint_descriptors[2].DeviceDescBank[0].PCKSIZE.bit.SIZE = 3;
 
     // Attach USB hardware
     USB->DEVICE.CTRLB.bit.DETACH = 0;
@@ -254,9 +274,9 @@ const uint8_t descriptor[] =
     USB_DEVICE_DESCRIPTOR_TYPE_DEVICE,   // descriptor type
     0x10,                                // usb version
     0x02,
-    0xff,                                // dev class
-    0xff,                                // dev subclass
-    0xff,                                // device protocol
+    0,                                   // dev class
+    0,                                   // dev subclass
+    0,                                   // device protocol
     64,                                  // ep0 max packet size
     0x11,                                // vendor id lsb
     0xba,                                // vendor id msb
@@ -288,7 +308,7 @@ uint8_t configuration_descriptor[] =
           // USB 2.0 spec section 9.1.1.5 implies that this value must not be 0.
     0,    // string index
     0x80,
-    50,
+    50,   // power consumption for this configuration.
 
     // ================================
     9,
@@ -296,15 +316,15 @@ uint8_t configuration_descriptor[] =
     0,  // interfaceNumber
     0,  // aternateSetting
     2,  // numEndpoints
-    0xff,  // interfaceClass
-    0xff,  // interfaceSubclass
-    0xff,  // interfaceProtocol
+    0x08,  // interfaceClass: mass storage
+    0x06,  // interfaceSubclass: SCSI
+    0x50,  // interfaceProtocol: BBB
     0,   // string index
 
     // ================
     7,
     USB_DEVICE_DESCRIPTOR_TYPE_ENDPOINT,
-    0x01,    // endpoint number
+    0x81,    // endpoint number
     0x02,    // bmAttributes (0x02 = bulk data)
     64,      // wMaxPacketSize
     0,
@@ -313,7 +333,7 @@ uint8_t configuration_descriptor[] =
     // ================
     7,
     USB_DEVICE_DESCRIPTOR_TYPE_ENDPOINT,
-    0x82,    // endpoint number
+    0x02,    // endpoint number
     0x02,    // bmAttributes (0x02 = bulk data)
     64,      // wMaxPacketSize
     0,
@@ -348,6 +368,12 @@ int32_t fill_setup_response(volatile usb_device_request_t *req, volatile uint8_t
             break;
         }
 
+        // SET_CONFIGURATION
+        case 0x09: {
+            bytes_filled = 0;
+            break;
+        }
+
         default: {
             bytes_filled = -1;
             break;
@@ -358,6 +384,8 @@ int32_t fill_setup_response(volatile usb_device_request_t *req, volatile uint8_t
 }
 
 
+
+
 void USB_Handler()
 {
     static uint8_t addr = 0;
@@ -366,9 +394,24 @@ void USB_Handler()
     if (USB->DEVICE.INTFLAG.bit.EORST) {
         SERCOM3_puts("USB reset\r\n");
         USB->DEVICE.DeviceEndpoint[0].EPCFG.bit.EPTYPE0 = 1;
+        USB->DEVICE.DeviceEndpoint[0].EPCFG.bit.EPTYPE1 = 1;
         USB->DEVICE.DeviceEndpoint[0].EPINTENSET.bit.RXSTP = 1;
         USB->DEVICE.DeviceEndpoint[0].EPINTENSET.bit.TRCPT0 = 1;
         USB->DEVICE.DeviceEndpoint[0].EPINTENSET.bit.TRCPT1 = 1;
+
+        USB->DEVICE.DeviceEndpoint[1].EPCFG.bit.EPTYPE0 = 0;
+        USB->DEVICE.DeviceEndpoint[1].EPCFG.bit.EPTYPE1 = 3;
+        USB->DEVICE.DeviceEndpoint[1].EPINTENSET.bit.TRCPT1 = 1;
+        // signal that EP1's IN bank presently lacks data.
+        USB->DEVICE.DeviceEndpoint[1].EPSTATUSCLR.bit.BK1RDY = 1;
+
+        USB->DEVICE.DeviceEndpoint[2].EPCFG.bit.EPTYPE0 = 3;
+        USB->DEVICE.DeviceEndpoint[2].EPCFG.bit.EPTYPE1 = 0;
+        USB->DEVICE.DeviceEndpoint[2].EPINTENSET.bit.TRCPT0 = 1;
+        // signal that EP2's OUT bank presently has space for data.
+        USB->DEVICE.DeviceEndpoint[2].EPSTATUSCLR.bit.BK0RDY = 1;
+
+
         USB->DEVICE.INTFLAG.reg = USB_DEVICE_INTFLAG_EORST;
     }
 
@@ -438,6 +481,26 @@ void USB_Handler()
             }
             USB->DEVICE.DeviceEndpoint[0].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT1;
         }
+    }
+
+    // handle endpoint 1 stuff
+    if (USB->DEVICE.EPINTSMRY.bit.EPINT1) {
+        SERCOM3_puts("EP1 TX finished:\r\n");
+    }
+
+    if (USB->DEVICE.EPINTSMRY.bit.EPINT2) {
+        uint8_t bytes = endpoint_descriptors[2].DeviceDescBank[0].PCKSIZE.bit.BYTE_COUNT;
+        static usb_mass_storage_cbw_t cbw;
+        memcpy((void*)&cbw, ep2_out_buf, bytes);
+        SERCOM3_puts("EP2 RX finished:\r\n");
+        hexprint((uint8_t*)&cbw, bytes);
+        SERCOM3_puts("\r\n");
+
+        // fill response
+
+
+        USB->DEVICE.DeviceEndpoint[2].EPSTATUSCLR.bit.BK0RDY = 1;
+        USB->DEVICE.DeviceEndpoint[2].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT0;
     }
 
     SERCOM3_puts("\r\n");

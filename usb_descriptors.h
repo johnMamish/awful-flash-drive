@@ -43,3 +43,23 @@ typedef enum usb_device_descriptor_type {
     USB_DEVICE_DESCRIPTOR_TYPE_OTH_SPD_CONFIGURATION = 7,
     USB_DEVICE_DESCRIPTOR_TYPE_INTERFACE_POWER       = 8
 } usb_device_descriptor_type_e;
+
+
+
+
+
+/**
+ * part of the USB mass storage spec... putting it here anyways
+ */
+#pragma pack(push, 1)
+typedef struct usb_mass_storage_cbw
+{
+    uint32_t cbw_signature;
+    uint32_t cbw_tag;
+    uint32_t cbw_data_transfer_length;
+    uint8_t  cbw_flags;
+    uint8_t  cbw_lun;
+    uint8_t cbwcb_length;
+    uint8_t cbwcb[16];
+} usb_mass_storage_cbw_t;
+#pragma pack(pop)
