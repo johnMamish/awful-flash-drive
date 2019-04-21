@@ -8,6 +8,8 @@
 #include <string.h>
 
 /**
+ * NB: a serial number string descriptor is REQUIRED for mass storage spec.
+ *
  * USB todos:
  *   ( ) Handle status stages which are longer than the endpoint size
  *   ( ) Keep track of which status stage we are in so that we can recover from errors

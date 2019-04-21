@@ -51,15 +51,3 @@ typedef enum usb_device_descriptor_type {
 /**
  * part of the USB mass storage spec... putting it here anyways
  */
-#pragma pack(push, 1)
-typedef struct usb_mass_storage_cbw
-{
-    uint32_t cbw_signature;
-    uint32_t cbw_tag;
-    uint32_t cbw_data_transfer_length;
-    uint8_t  cbw_flags;
-    uint8_t  cbw_lun;
-    uint8_t cbwcb_length;
-    uint8_t cbwcb[16];
-} usb_mass_storage_cbw_t;
-#pragma pack(pop)
