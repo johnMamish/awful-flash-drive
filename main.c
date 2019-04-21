@@ -2,6 +2,7 @@
 
 #include "char_buffer.h"
 #include "interrupt_utils.h"
+#include "scsi.h"
 #include "usb_descriptors.h"
 
 #include <stdint.h>
@@ -13,13 +14,14 @@
  * USB todos:
  *   ( ) Handle status stages which are longer than the endpoint size
  *   ( ) Keep track of which status stage we are in so that we can recover from errors
- *   ( )
+ *   ( ) Could save memcpys when it comes to fixed descriptors by just pointing the USB DMA at the
+ *       fixed descriptor
  */
 
 const volatile uint8_t *NVM_SOFTWARE_CAL_AREA = (void*)0x806020;
 
 volatile char_buffer_t sercom3_tx_buf;
-uint8_t sercom3_tx_buf_space[1024];
+uint8_t sercom3_tx_buf_space[2048];
 
 static volatile UsbDeviceDescriptor endpoint_descriptors[8] __attribute__((aligned(4))) = { 0 };
 
@@ -32,7 +34,8 @@ uint8_t ep2_out_buf[64];
 void SERCOM3_putch(char ch)
 {
     uint32_t ctx;
-    interrupts_disable(&ctx);
+    //interrupts_disable(&ctx);
+    asm volatile("cpsid i");
     if (SERCOM3->USART.INTENSET.reg & SERCOM_USART_INTENSET_DRE) {
         // If the txempty interrupt is already enabled, it's expecting data in the buffer
         char_buffer_putc(&sercom3_tx_buf, ch);
@@ -41,7 +44,8 @@ void SERCOM3_putch(char ch)
         SERCOM3->USART.INTENSET.reg = SERCOM_USART_INTENSET_DRE;
         SERCOM3->USART.DATA.reg = ch;
     }
-    interrupts_restore(&ctx);
+    //interrupts_restore(&ctx);
+    asm volatile ("cpsie i");
 }
 
 
@@ -488,21 +492,34 @@ void USB_Handler()
     // handle endpoint 1 stuff
     if (USB->DEVICE.EPINTSMRY.bit.EPINT1) {
         SERCOM3_puts("EP1 TX finished:\r\n");
+
+        int32_t bytes_to_send = scsi_handle(&scsi_state,
+                                            USB_TRANSFER_DIRECTION_IN,
+                                            ep2_out_buf,
+                                            bytes,
+                                            ep1_in_buf);
+
+        USB->DEVICE.DeviceEndpoint[1].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT1;
     }
 
     if (USB->DEVICE.EPINTSMRY.bit.EPINT2) {
         uint8_t bytes = endpoint_descriptors[2].DeviceDescBank[0].PCKSIZE.bit.BYTE_COUNT;
-        static usb_mass_storage_cbw_t cbw;
-        memcpy((void*)&cbw, ep2_out_buf, bytes);
+        static scsi_state_t scsi_state;
+        int32_t bytes_to_send = scsi_handle(&scsi_state,
+                                            USB_TRANSFER_DIRECTION_OUT,
+                                            ep2_out_buf,
+                                            bytes,
+                                            ep1_in_buf);
+
         SERCOM3_puts("EP2 RX finished:\r\n");
-        hexprint((uint8_t*)&cbw, bytes);
+        hexprint((uint8_t*)(&scsi_state.cbw), bytes);
         SERCOM3_puts("\r\n");
-
-        // fill response
-
 
         USB->DEVICE.DeviceEndpoint[2].EPSTATUSCLR.bit.BK0RDY = 1;
         USB->DEVICE.DeviceEndpoint[2].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT0;
+
+        endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
+        USB->DEVICE.DeviceEndpoint[1].EPSTATUSSET.bit.BK1RDY = 1;
     }
 
     SERCOM3_puts("\r\n");
