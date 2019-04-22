@@ -1,0 +1,10 @@
+# tell github which code is vendor provided
+# ultimately, I'd like to include a setup script which will pull these files, but in the meantime,
+# this is my solution.
+
+samd21/* linguist-vendored
+CMSIS/* linguist-vendored
+samd21j18a_flash.ld linguist-vendored
+samd21j18a_sram.ld linguist-vendored
+system_samd21.h linguist-vendored
+system_samd21.c linguist-vendored
