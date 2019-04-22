@@ -42,7 +42,7 @@ CFLAGS += -march=armv6-m -mthumb -mno-thumb-interwork -mtune=cortex-m0plus
 # Linker script stuff
 CFLAGS += -ffunction-sections
 
-OPTIMIZATION = -O0
+OPTIMIZATION = -O3
 CFLAGS += --std=gnu99 $(OPTIMIZATION) -g
 
 #define samd21j18a

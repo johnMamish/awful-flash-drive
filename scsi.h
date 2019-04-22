@@ -17,10 +17,22 @@ typedef struct usb_mass_storage_cbw
 } usb_mass_storage_cbw_t;
 #pragma pack(pop)
 
+
+#pragma pack(push, 1)
+typedef struct usb_mass_storage_csw
+{
+    uint8_t  csw_signature[4];
+    uint32_t csw_tag;
+    int32_t  csw_data_residue;
+    uint8_t  csw_status;
+} usb_mass_storage_csw_t;
+#pragma pack(pop)
+
 typedef enum cbw_flow {
-    CBW_FLOW_CBW_STATE,
-    CBW_FLOW_DATA_STATE,
-    CBW_FLOW_CSW_STATE,
+    CBW_FLOW_EXPECTING_CBW_STATE,
+    CBW_FLOW_DATA_IN_PENDING_STATE,
+    CBW_FLOW_EXPECTING_DATA_OUT_STATE,
+    CBW_FLOW_CSW_PENDING_STATE,
     CBW_FLOW_ERROR_STATE
 } cbw_flow_e;
 
@@ -31,6 +43,7 @@ typedef enum usb_transfer_direction {
 
 typedef struct scsi_state {
     usb_mass_storage_cbw_t cbw;
+    usb_mass_storage_csw_t csw;
     cbw_flow_e current_state;
 
     // TODO: this should either be unsigned or I should confirm that it will never be > 0x7fffffff.
@@ -38,11 +51,14 @@ typedef struct scsi_state {
 } scsi_state_t;
 
 
+#define SCSI_COMMAND_TEST_UNIT_READY 0x00
 #define SCSI_COMMAND_INQUIRY 0x12
 
+#define SCSI_COMMAND_READ_CAPACITY_10 0x25
 /**
- * Returns number of bytes processed.
- * Returns -1 if a STALL was placed in the IN direction
+ * Returns number of bytes processed, 0 indicates that a ZLP should be sent.
+ * Returns -1 if there is no data to send
+ * Returns -2 if a STALL should be placed in the IN direction
  */
 int32_t scsi_handle(scsi_state_t *state,
                     usb_transfer_direction_e dir,
