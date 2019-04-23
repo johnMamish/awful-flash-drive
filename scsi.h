@@ -38,7 +38,9 @@ typedef enum cbw_flow {
 
 typedef enum usb_transfer_direction {
     USB_TRANSFER_DIRECTION_OUT,
-    USB_TRANSFER_DIRECTION_IN
+    USB_TRANSFER_DIRECTION_IN,
+    USB_TRANSFER_DIRECTION_OUT_STALL,
+    USB_TRANSFER_DIRECTION_IN_STALL
 } usb_transfer_direction_e;
 
 typedef struct scsi_state {

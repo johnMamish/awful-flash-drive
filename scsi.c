@@ -41,7 +41,7 @@ int32_t scsi_handle(scsi_state_t *state,
             } else {
                 memcpy((void*)&state->cbw, out_buf, out_buf_nbytes);
                 state->data_stage_bytes_remaining = state->cbw.cbw_data_transfer_length;
-
+                state->csw.csw_status = 0;
                 switch (state->cbw.cbwcb[0]) {
                     case SCSI_COMMAND_INQUIRY: {
                         if (state->cbw.cbw_data_transfer_length > sizeof(scsi_inquiry_response)) {
@@ -84,7 +84,8 @@ int32_t scsi_handle(scsi_state_t *state,
 
                     default: {
                         // TODO: handle unsupported command: stall BULK-in pipe
-                        bytes_to_send = -1;
+                        bytes_to_send = -2;
+                        state->csw.csw_status = 1;
                         break;
                     }
                 }
@@ -94,20 +95,31 @@ int32_t scsi_handle(scsi_state_t *state,
 
         case CBW_FLOW_EXPECTING_DATA_OUT_STATE: {
             // do the action
-            if (dir != USB_TRANSFER_DIRECTION_OUT) {
+            if ((dir != USB_TRANSFER_DIRECTION_OUT) &&
+                (dir != USB_TRANSFER_DIRECTION_OUT_STALL)){
                 state->current_state = CBW_FLOW_ERROR_STATE;
             } else {
-                switch (state->cbw.cbwcb[0]) {
-                    default: {
-                        // this should never happen
-                        state->current_state = CBW_FLOW_DATA_IN_PENDING_STATE;
-                        break;
+                if (dir == USB_TRANSFER_DIRECTION_OUT) {
+                    switch (state->cbw.cbwcb[0]) {
+                        default: {
+                            // this should never happen
+                            state->current_state = CBW_FLOW_DATA_IN_PENDING_STATE;
+                            state->csw.csw_status = 1;
+                            break;
+                        }
                     }
                 }
 
                 // TODO: how to handle spaghetti logic if result of switch statement "doesn't want"
                 // a CSW sent?
                 // Send a CSW based on what happened during the "do it" part.
+                memcpy(state->csw.csw_signature, "USBS", 4);
+                state->csw.csw_tag = state->cbw.cbw_tag;
+                state->csw.csw_data_residue = state->data_stage_bytes_remaining;
+                bytes_to_send = 13;
+                memcpy(in_buf, &(state->csw), bytes_to_send);
+
+                state->current_state = CBW_FLOW_CSW_PENDING_STATE;
             }
             break;
         }
@@ -117,7 +129,6 @@ int32_t scsi_handle(scsi_state_t *state,
             memcpy(state->csw.csw_signature, "USBS", 4);
             state->csw.csw_tag = state->cbw.cbw_tag;
             state->csw.csw_data_residue = state->data_stage_bytes_remaining;
-            state->csw.csw_status = 0;
             bytes_to_send = 13;
             memcpy(in_buf, &(state->csw), bytes_to_send);
 

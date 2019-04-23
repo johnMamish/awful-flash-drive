@@ -1,3 +1,11 @@
+/**
+ * Copyright (C) 2019 John Mamish
+ * All right reserved.
+ *
+ * This software was developed independently by John Mamish. Please contact me at
+ * john.mamish <at> gmail dotcom to license it.
+ */
+
 #include "samd21.h"
 
 #include "char_buffer.h"
@@ -229,10 +237,12 @@ void init_hardware()
     USB->DEVICE.DeviceEndpoint[1].EPCFG.bit.EPTYPE0 = 0;
     USB->DEVICE.DeviceEndpoint[1].EPCFG.bit.EPTYPE1 = 3;
     USB->DEVICE.DeviceEndpoint[1].EPINTENSET.bit.TRCPT1 = 1;
+    USB->DEVICE.DeviceEndpoint[1].EPINTENSET.bit.STALL1 = 1;
 
     USB->DEVICE.DeviceEndpoint[2].EPCFG.bit.EPTYPE0 = 3;
     USB->DEVICE.DeviceEndpoint[2].EPCFG.bit.EPTYPE1 = 0;
     USB->DEVICE.DeviceEndpoint[2].EPINTENSET.bit.TRCPT0 = 1;
+    USB->DEVICE.DeviceEndpoint[2].EPINTENSET.bit.STALL0 = 1;
     // </ENDPOINT CONFIGURATIONS>
 
     endpoint_descriptors[0].DeviceDescBank[0].ADDR.reg = (uint32_t)ep0_out_buf;
@@ -408,13 +418,14 @@ void USB_Handler()
         USB->DEVICE.DeviceEndpoint[1].EPINTENSET.bit.TRCPT1 = 1;
         // signal that EP1's IN bank presently lacks data.
         USB->DEVICE.DeviceEndpoint[1].EPSTATUSCLR.bit.BK1RDY = 1;
+        USB->DEVICE.DeviceEndpoint[1].EPINTENSET.bit.STALL1 = 1;
 
         USB->DEVICE.DeviceEndpoint[2].EPCFG.bit.EPTYPE0 = 3;
         USB->DEVICE.DeviceEndpoint[2].EPCFG.bit.EPTYPE1 = 0;
         USB->DEVICE.DeviceEndpoint[2].EPINTENSET.bit.TRCPT0 = 1;
         // signal that EP2's OUT bank presently has space for data.
         USB->DEVICE.DeviceEndpoint[2].EPSTATUSCLR.bit.BK0RDY = 1;
-
+        USB->DEVICE.DeviceEndpoint[2].EPINTENSET.bit.STALL0 = 1;
 
         USB->DEVICE.INTFLAG.reg = USB_DEVICE_INTFLAG_EORST;
     }
@@ -491,23 +502,41 @@ void USB_Handler()
 
     // handle endpoint 1 stuff
     if (USB->DEVICE.EPINTSMRY.bit.EPINT1) {
-        uint8_t bytes = endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT;
-        SERCOM3_puts("EP1 TX finished:\r\n");
-        hexprint((uint8_t*)(ep1_in_buf), bytes);
-        SERCOM3_puts("\r\n\r\n");
+        // ugh so much spaghetti
+        if (USB->DEVICE.EPINTFLAG.bit.TRCPT1) {
+            uint8_t bytes = endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT;
+            SERCOM3_puts("EP1 TX finished:\r\n");
+            hexprint((uint8_t*)(ep1_in_buf), bytes);
+            SERCOM3_puts("\r\n\r\n");
 
-        int32_t bytes_to_send = scsi_handle(&scsi_state,
-                                            USB_TRANSFER_DIRECTION_IN,
-                                            ep2_out_buf,
-                                            0,
-                                            ep1_in_buf);
+            int32_t bytes_to_send = scsi_handle(&scsi_state,
+                                                USB_TRANSFER_DIRECTION_IN,
+                                                ep2_out_buf,
+                                                0,
+                                                ep1_in_buf);
 
-        // clear the pending interrupt
-        USB->DEVICE.DeviceEndpoint[1].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT1;
+            // clear the pending interrupt
+            USB->DEVICE.DeviceEndpoint[1].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_TRCPT1;
 
-        if (bytes_to_send >= 0) {
-            endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
-            USB->DEVICE.DeviceEndpoint[1].EPSTATUSSET.bit.BK1RDY = 1;
+            if (bytes_to_send >= 0) {
+                endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
+                USB->DEVICE.DeviceEndpoint[1].EPSTATUSSET.bit.BK1RDY = 1;
+            }
+        } else if (USB->DEVICE.EPINTFLAG.bit.STALL1) {
+            SERCOM3_puts("EP1 STALL sent.\r\n");
+            int32_t bytes_to_send = scsi_handle(&scsi_state,
+                                                USB_TRANSFER_DIRECTION_IN_STALL,
+                                                ep2_out_buf,
+                                                0,
+                                                ep1_in_buf);
+
+            // clear the pending interrupt
+            USB->DEVICE.DeviceEndpoint[1].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_STALL1;
+
+            if (bytes_to_send >= 0) {
+                endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
+                USB->DEVICE.DeviceEndpoint[1].EPSTATUSSET.bit.BK1RDY = 1;
+            }
         }
     }
 
