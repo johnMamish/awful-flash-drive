@@ -72,6 +72,10 @@ int32_t scsi_handle(scsi_state_t *state,
                         break;
                     }
 
+//                    case SCSI_COMMAND_MODE_SENSE_6: {
+//                        break;
+//                    }
+
                     case SCSI_COMMAND_READ_CAPACITY_10: {
                         bytes_to_send = 8;
                         memcpy(in_buf, scsi_capacity, bytes_to_send);
@@ -82,8 +86,14 @@ int32_t scsi_handle(scsi_state_t *state,
                         break;
                     }
 
+                        // SPC-3: top of page 23
+                        // If a device server receives a CDB containing an operation
+                        // code that is invalid or not supported, the command shall be terminated
+                        // with CHECK CONDITION status, with the sense key set to ILLEGAL REQUEST,
+                        // and the additional sense code set to INVALID COMMAND OPERATION CODE.
                     default: {
                         // TODO: handle unsupported command: stall BULK-in pipe
+                        state->current_state = CBW_FLOW_DATA_IN_PENDING_STATE;
                         bytes_to_send = -2;
                         state->csw.csw_status = 1;
                         break;

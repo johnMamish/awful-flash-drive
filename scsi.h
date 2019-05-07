@@ -56,6 +56,11 @@ typedef struct scsi_state {
 #define SCSI_COMMAND_TEST_UNIT_READY 0x00
 #define SCSI_COMMAND_INQUIRY 0x12
 
+// according to Jan Axelson's book, this command is not a mandatory SCSI command, but if I STALL it,
+// my laptop seems to throw a fit by trying to disable my BBB IN endpoint. Indeed, according to
+// wireshark I'm properly STALLing the command, and immediately my laptop sends a "clear feature"
+#define SCSI_COMMAND_MODE_SENSE_6 0x1a
+
 #define SCSI_COMMAND_READ_CAPACITY_10 0x25
 /**
  * Returns number of bytes processed, 0 indicates that a ZLP should be sent.
@@ -68,5 +73,6 @@ int32_t scsi_handle(scsi_state_t *state,
                     uint8_t out_buf_nbytes,
                     uint8_t *in_buf);
 
+void scsi_clear_feature_in(scsi_state_t *state);
 
 #endif

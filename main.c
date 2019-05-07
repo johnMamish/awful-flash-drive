@@ -105,7 +105,7 @@ void SERCOM3_puti(uint32_t n)
     }
 }
 
-void hexprint(uint8_t *data, int len)
+void hexprint(const uint8_t *data, int len)
 {
     for (int i = 0; i < len; i++) {
         SERCOM3_putx8(data[i]);
@@ -115,6 +115,16 @@ void hexprint(uint8_t *data, int len)
     }
 }
 
+
+void cbw_print(const usb_mass_storage_cbw_t *cbw) {
+    uint8_t *sig = (uint8_t*)&cbw->cbw_signature;
+    SERCOM3_puts("  sig: "); for(int i = 0; i < 4; SERCOM3_putch(sig[i++])); SERCOM3_puts("\r\n");
+    SERCOM3_puts("  tag: "); SERCOM3_putx8(cbw->cbw_tag); SERCOM3_puts("\r\n");
+    SERCOM3_puts("  len: "); SERCOM3_putx8(cbw->cbw_data_transfer_length); SERCOM3_puts("\r\n");
+    SERCOM3_puts("  flags: "); hexprint((uint8_t*)&cbw->cbw_flags, 1); SERCOM3_puts("\r\n");
+    SERCOM3_puts("  cbwcblen: "); hexprint((uint8_t*)&cbw->cbwcb_length, 1); SERCOM3_puts("\r\n");
+    hexprint(cbw->cbwcb, 16);SERCOM3_puts("\r\n");
+}
 
 void SERCOM3_Handler()
 {
@@ -211,7 +221,7 @@ void init_hardware()
     PORT->Group[0].PINCFG[24].reg = 1;
     PORT->Group[0].PINCFG[25].reg = 1;
 
-    // Load PADCAL registers
+    // Load Padcal Registers
     // todo: mess around by changing / forgetting these values and see what happens
     USB->DEVICE.PADCAL.bit.TRIM   = (((NVM_SOFTWARE_CAL_AREA[7] & 0b00000011) << 1) |
                                      ((NVM_SOFTWARE_CAL_AREA[6] & 0b10000000) >> 7));
@@ -404,6 +414,8 @@ void USB_Handler()
 {
     static uint8_t addr = 0;
 
+    static scsi_state_t scsi_state = { 0 };
+
     // handle usb events
     if (USB->DEVICE.INTFLAG.bit.EORST) {
         SERCOM3_puts("USB reset\r\n");
@@ -462,10 +474,33 @@ void USB_Handler()
             } else {
                 // handle commands without a data stage
                 // NB: the only host->device command with a data stage is "SET_DESCRIPTOR"
-                addr = ep0_out_buf[2];
-                endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = 0;
-                USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.BK1RDY = 1;
+                if (request.request == 5) {
+                    addr = ep0_out_buf[2];
+                    endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = 0;
+                    USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.BK1RDY = 1;
+                }
+                else if ((request.request == 1) && (request.index == 0x0081)) {
+                    // NB: hacky code. "clear feature" requests should be passed to code that
+                    // manages the SCSI stuff, and I should check that it accepts the STALL.
+                    endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = 0;
+                    USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.BK1RDY = 1;
 
+                    USB->DEVICE.DeviceEndpoint[1].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_STALL1;
+                    USB->DEVICE.DeviceEndpoint[1].EPSTATUSCLR.bit.STALLRQ1 = 1;
+                    int32_t bytes_to_send = scsi_handle(&scsi_state,
+                                                        USB_TRANSFER_DIRECTION_IN,
+                                                        ep2_out_buf,
+                                                        0,
+                                                        ep1_in_buf);
+                    if (bytes_to_send >= 0) {
+                        SERCOM3_puts("quaz\r\n");
+                        endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
+                        USB->DEVICE.DeviceEndpoint[1].EPSTATUSSET.bit.BK1RDY = 1;
+                    }
+                } else {
+                    endpoint_descriptors[0].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = 0;
+                    USB->DEVICE.DeviceEndpoint[0].EPSTATUSSET.bit.BK1RDY = 1;
+                }
             }
 
             USB->DEVICE.DeviceEndpoint[0].EPSTATUSCLR.bit.BK0RDY = 1;
@@ -498,12 +533,10 @@ void USB_Handler()
         }
     }
 
-    static scsi_state_t scsi_state = { 0 };
-
     // handle endpoint 1 stuff
     if (USB->DEVICE.EPINTSMRY.bit.EPINT1) {
         // ugh so much spaghetti
-        if (USB->DEVICE.EPINTFLAG.bit.TRCPT1) {
+        if (USB->DEVICE.DeviceEndpoint[1].EPINTFLAG.bit.TRCPT1) {
             uint8_t bytes = endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT;
             SERCOM3_puts("EP1 TX finished:\r\n");
             hexprint((uint8_t*)(ep1_in_buf), bytes);
@@ -522,21 +555,22 @@ void USB_Handler()
                 endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
                 USB->DEVICE.DeviceEndpoint[1].EPSTATUSSET.bit.BK1RDY = 1;
             }
-        } else if (USB->DEVICE.EPINTFLAG.bit.STALL1) {
+        } else if (USB->DEVICE.DeviceEndpoint[1].EPINTFLAG.bit.STALL1) {
             SERCOM3_puts("EP1 STALL sent.\r\n");
-            int32_t bytes_to_send = scsi_handle(&scsi_state,
+/*            int32_t bytes_to_send = scsi_handle(&scsi_state,
                                                 USB_TRANSFER_DIRECTION_IN_STALL,
                                                 ep2_out_buf,
                                                 0,
-                                                ep1_in_buf);
+                                                ep1_in_buf);*/
 
             // clear the pending interrupt
             USB->DEVICE.DeviceEndpoint[1].EPINTFLAG.reg = USB_DEVICE_EPINTFLAG_STALL1;
 
-            if (bytes_to_send >= 0) {
+/*            if (bytes_to_send >= 0) {
+                SERCOM3_puts("baz\r\n");
                 endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
                 USB->DEVICE.DeviceEndpoint[1].EPSTATUSSET.bit.BK1RDY = 1;
-            }
+                }*/
         }
     }
 
@@ -549,12 +583,7 @@ void USB_Handler()
                                             ep1_in_buf);
 
         SERCOM3_puts("RX CBW: \r\n");
-        SERCOM3_puts("  sig: "); hexprint((uint8_t*)&scsi_state.cbw.cbw_signature, 4); SERCOM3_puts("\r\n");
-        SERCOM3_puts("  tag: "); SERCOM3_putx8(scsi_state.cbw.cbw_tag); SERCOM3_puts("\r\n");
-        SERCOM3_puts("  len: "); SERCOM3_putx8(scsi_state.cbw.cbw_data_transfer_length); SERCOM3_puts("\r\n");
-        SERCOM3_puts("  flags: "); hexprint((uint8_t*)&scsi_state.cbw.cbw_flags, 1); SERCOM3_puts("\r\n");
-        SERCOM3_puts("  cbwcblen: "); hexprint((uint8_t*)&scsi_state.cbw.cbwcb_length, 1); SERCOM3_puts("\r\n");
-        hexprint(scsi_state.cbw.cbwcb, 16);SERCOM3_puts("\r\n");
+        cbw_print(&(scsi_state.cbw));
         SERCOM3_puts("\r\n");
 
         USB->DEVICE.DeviceEndpoint[2].EPSTATUSCLR.bit.BK0RDY = 1;
@@ -563,9 +592,10 @@ void USB_Handler()
         if (bytes_to_send >= 0) {
             endpoint_descriptors[1].DeviceDescBank[1].PCKSIZE.bit.BYTE_COUNT = bytes_to_send;
             USB->DEVICE.DeviceEndpoint[1].EPSTATUSSET.bit.BK1RDY = 1;
-        } else if (bytes_to_send == -1) {
+        } else if (bytes_to_send == -2) {
             // TODO: stall IN endpoint
             // make sure to service STALL interrupt
+            USB->DEVICE.DeviceEndpoint[1].EPSTATUSSET.bit.STALLRQ1 = 1;
         }
     }
 
